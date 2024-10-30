@@ -1,0 +1,119 @@
+import pandas as pd
+from xgboost import XGBClassifier
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from lightgbm import LGBMClassifier
+from catboost import CatBoostClassifier
+from imblearn.combine import SMOTETomek
+from imblearn.pipeline import Pipeline
+from category_encoders import TargetEncoder
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import cross_val_score
+from sklearn.compose import ColumnTransformer
+
+# Шлях до файлів з даними
+train_data_path = '/kaggle/input/ml-fundamentals-and-applications-2024-10-01/final_proj_data.csv'
+test_data_path = '/kaggle/input/ml-fundamentals-and-applications-2024-10-01/final_proj_test.csv'
+
+# Читаємо дані
+train_data = pd.read_csv(train_data_path)
+test_data = pd.read_csv(test_data_path)
+
+# Переглядаємо перші кілька рядків і основну інформацію для аналізу аномалій
+train_data_info = train_data.info()
+train_data_head = train_data.head()
+missing_values = train_data.isnull().sum()
+# Перевірка на аномальні значення (перевищення меж, унікальні значення)
+summary_statistics = train_data.describe(include='all')
+# Показник кількості унікальних значень для категоріальних ознак
+unique_values = train_data.nunique()
+train_data_info, train_data_head, missing_values, summary_statistics, unique_values
+
+# Оцінка розподілу класів у цільовій змінній 'y'
+class_distribution = train_data['y'].value_counts(normalize=True)
+class_distribution
+
+# Видалення ознаки Var200
+columns_to_remove = ['Var200']
+train_data = train_data.drop(columns=columns_to_remove, errors='ignore')
+test_data = test_data.drop(columns=columns_to_remove, errors='ignore')
+
+# Відокремлення числових і категоріальних ознак
+numerical_columns = [col for col in train_data.select_dtypes(include=['float64', 'int64']).columns if col != 'y']
+categorical_columns = train_data.select_dtypes(include=['object']).columns.tolist()
+
+# Видалення колонок із великою кількістю пропусків (>30%)
+threshold = 0.3 * len(train_data)
+columns_to_remove = train_data.isnull().sum()[train_data.isnull().sum() > threshold].index.tolist()
+train_data = train_data.drop(columns=columns_to_remove)
+test_data = test_data.drop(columns=columns_to_remove, errors='ignore')
+
+# Оновлення списків ознак після видалення колонок
+numerical_columns = [col for col in numerical_columns if col in train_data.columns]
+categorical_columns = [col for col in categorical_columns if col in train_data.columns]
+
+# Обробники для числових та категоріальних ознак
+numeric_transformer = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='median')),
+    ('scaler', StandardScaler())
+])
+
+categorical_transformer = Pipeline(steps=[
+    ('encoder', TargetEncoder())
+])
+
+# Об'єднання обробників для числових і категоріальних ознак
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', numeric_transformer, numerical_columns),
+        ('cat', categorical_transformer, categorical_columns)
+    ])
+
+# Ініціалізація моделей для ансамблю з оптимізованими гіперпараметрами
+xgb_model = XGBClassifier(subsample=0.9828, n_estimators=479, max_depth=5, learning_rate=0.1862, gamma=0.2323,
+                          colsample_bytree=0.7962, min_child_weight=1, random_state=42, eval_metric='logloss')
+rf_model = RandomForestClassifier(n_estimators=267, min_samples_split=5, min_samples_leaf=2, max_depth=19,
+                                  max_features=0.3864856030438456, bootstrap=False, random_state=42)
+lgb_model = LGBMClassifier(colsample_bytree=0.76901, learning_rate=0.04848, max_depth=5, n_estimators=303,
+                           num_leaves=95, subsample=0.6179, random_state=42, force_col_wise=True, verbose=-1)
+cat_model = CatBoostClassifier(iterations=856, depth=9, learning_rate=0.2081, l2_leaf_reg=8.685,
+                               bagging_temperature=0.05476, verbose=0, random_state=42)
+
+# Ініціалізація VotingClassifier з різними вагами для кожної моделі
+voting_clf = VotingClassifier(estimators=[
+    ('xgb', xgb_model),
+    ('rf', rf_model),
+    ('lgb', lgb_model),
+    ('cat', cat_model)
+], voting='soft', weights=[2, 3, 1, 15])
+
+# Побудова конвеєра з використанням imblearn.pipeline.Pipeline
+pipeline = Pipeline(steps=[
+    ('preprocessor', preprocessor),
+    ('smote_tomek', SMOTETomek(random_state=42)),
+    ('classifier', voting_clf)
+])
+
+# Відокремлення ознак і цільової змінної для тренувальних даних
+X_train = train_data.drop('y', axis=1)
+y_train = train_data['y']
+
+# Крос-валідація
+cv_scores = cross_val_score(pipeline, X_train, y_train, cv=8, scoring='balanced_accuracy')
+mean_cv_score = cv_scores.mean()
+print(f"Крос-валідація - Збалансована точність: {mean_cv_score}")
+
+# Навчання фінальної моделі на всіх тренувальних даних
+pipeline.fit(X_train, y_train)
+
+# Прогнозування на тестових даних
+X_test = test_data.drop('y', axis=1, errors='ignore')
+y_test_predictions = pipeline.predict(X_test)
+
+# Підготовка та збереження фінальних прогнозів
+final_submission = pd.DataFrame({'index': test_data.index, 'y': y_test_predictions})
+final_submission.to_csv('/kaggle/working/final_proj_sample_submission.csv', index=False)
+print(final_submission.head())
+
+
+
